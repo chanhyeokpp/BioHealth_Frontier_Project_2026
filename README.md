@@ -1,6 +1,3 @@
-# BioHealth_Frontier_Project_2026
-이 프로젝트는 BraTS2021 데이터를 활용하여 MRI 영상에서 뇌종양 부위를 자동으로 분할(Segmentation)하는 AI 모델을 구현한 프로젝트입니다.
-
 
 # BioHealth_Frontier_Project
 ### 🧠 3D U-Net을 활용한 BraTS2021 뇌종양 분할 AI 모델
