@@ -1,0 +1,14 @@
+# 가상환경 (용량이 큼)
+.venv/
+
+# MRI 데이터 (깃허브 용량 초과 방지)
+BraTS2021_Training_Data/
+BraTS2021_00495/
+data/
+
+# 학습된 모델 (무거움)
+*.pth
+
+# 파이썬 캐시 및 시스템 파일
+__pycache__/
+.DS_Store
