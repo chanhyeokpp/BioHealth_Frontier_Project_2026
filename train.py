@@ -1,157 +1,117 @@
+import random
+
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 
-from data_loader import (
-    get_split_lists,
-    BraTS2DDataset,
-    DATA_DIR
+from config import (
+    BEST_MODEL_PATH,
+    EPOCHS,
+    LEARNING_RATE,
+    MODEL_DIR,
+    RANDOM_SEED,
+    WEIGHT_DECAY,
 )
+from data_loader import build_loaders
+from model import build_model
 
-from model import UNet2D
 
-# ============================================================
-# DEVICE
-# ============================================================
+def get_device():
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
 
-device = torch.device(
-    "mps" if torch.backends.mps.is_available()
-    else "cpu"
-)
 
-print("=" * 60)
-print(f"🚀 device: {device}")
-print("=" * 60)
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
-# ============================================================
-# DICE
-# ============================================================
 
-def dice_score(pred, target, num_classes=5):
+def run_one_epoch(model, loader, criterion, device, optimizer=None, phase="train"):
+    is_train = optimizer is not None
+    model.train() if is_train else model.eval()
 
-    dice = 0.0
+    loss_sum = 0.0
+    correct = 0
+    total = 0
 
-    pred = pred.view(-1)
-    target = target.view(-1)
+    context = torch.enable_grad() if is_train else torch.no_grad()
+    with context:
+        for batch_idx, (images, labels) in enumerate(loader, start=1):
+            images = images.to(device)
+            labels = labels.to(device)
 
-    for c in range(1, num_classes):
+            if is_train:
+                optimizer.zero_grad()
 
-        p = (pred == c)
-        t = (target == c)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
 
-        inter = (p & t).sum().float()
-        union = p.sum() + t.sum()
+            if is_train:
+                loss.backward()
+                optimizer.step()
 
-        if union == 0:
-            continue
+            preds = outputs.argmax(dim=1)
+            loss_sum += loss.item() * images.size(0)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
 
-        dice += (2 * inter) / union
+            if batch_idx == 1 or batch_idx % 20 == 0 or batch_idx == len(loader):
+                current_loss = loss_sum / total
+                current_acc = correct / total
+                print(
+                    f"{phase} batch {batch_idx:03d}/{len(loader)} | "
+                    f"loss {current_loss:.4f} acc {current_acc:.4f}"
+                )
 
-    return dice / (num_classes - 1)
+    return loss_sum / total, correct / total
 
-# ============================================================
-# VALIDATION
-# ============================================================
 
-def validate(model, loader, criterion):
+def main():
+    set_seed(RANDOM_SEED)
+    MODEL_DIR.mkdir(exist_ok=True)
 
-    model.eval()
-    loss_sum = 0
+    device = get_device()
+    print("=" * 60)
+    print(f"device: {device}")
+    print("=" * 60)
 
-    with torch.no_grad():
+    train_loader, val_loader, _ = build_loaders()
+    model = build_model().to(device)
 
-        for x, y in loader:
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
+    )
 
-            x, y = x.to(device), y.to(device)
+    best_val_acc = 0.0
 
-            out = model(x)
-            loss = criterion(out, y)
+    for epoch in range(1, EPOCHS + 1):
+        train_loss, train_acc = run_one_epoch(
+            model, train_loader, criterion, device, optimizer, phase="train"
+        )
+        val_loss, val_acc = run_one_epoch(model, val_loader, criterion, device, phase="val")
 
-            loss_sum += loss.item()
+        print(
+            f"Epoch {epoch:02d}/{EPOCHS} | "
+            f"train loss {train_loss:.4f} acc {train_acc:.4f} | "
+            f"val loss {val_loss:.4f} acc {val_acc:.4f}"
+        )
 
-    return loss_sum / len(loader)
-
-# ============================================================
-# DATA
-# ============================================================
-
-train_ids, val_ids, test_ids = get_split_lists()
-
-train_ids = train_ids[:20]
-val_ids = val_ids[:5]
-test_ids = test_ids[:5]
-
-train_ds = BraTS2DDataset(train_ids, DATA_DIR)
-val_ds = BraTS2DDataset(val_ids, DATA_DIR)
-test_ds = BraTS2DDataset(test_ids, DATA_DIR)
-
-train_loader = DataLoader(train_ds, batch_size=2, shuffle=True)
-val_loader = DataLoader(val_ds, batch_size=2)
-test_loader = DataLoader(test_ds, batch_size=1)
-
-# ============================================================
-# MODEL
-# ============================================================
-
-model = UNet2D().to(device)
-
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-# ============================================================
-# TRAIN
-# ============================================================
-
-EPOCHS = 1
-
-for epoch in range(EPOCHS):
-
-    model.train()
-    train_loss = 0
-
-    for i, (x, y) in enumerate(train_loader):
-
-        x, y = x.to(device), y.to(device)
-
-        optimizer.zero_grad()
-
-        out = model(x)
-        loss = criterion(out, y)
-
-        loss.backward()
-        optimizer.step()
-
-        train_loss += loss.item()
-
-    val_loss = validate(model, val_loader, criterion)
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), BEST_MODEL_PATH)
+            print(f"saved best model: {BEST_MODEL_PATH} ({best_val_acc:.4f})")
 
     print("=" * 60)
-    print(f"Epoch {epoch+1}")
-    print(f"Train Loss: {train_loss/len(train_loader):.4f}")
-    print(f"Val Loss:   {val_loss:.4f}")
+    print(f"best val accuracy: {best_val_acc:.4f}")
+    print("=" * 60)
 
-    torch.save(model.state_dict(), f"unet_epoch_{epoch+1}.pth")
 
-# ============================================================
-# TEST (DICE)
-# ============================================================
-
-model.eval()
-
-dice_list = []
-
-with torch.no_grad():
-
-    for x, y in test_loader:
-
-        x, y = x.to(device), y.to(device)
-
-        out = model(x)
-        pred = torch.argmax(out, dim=1)
-
-        dice = dice_score(pred, y)
-        dice_list.append(dice.item())
-
-print("=" * 60)
-print(f"🔥 TEST DICE: {sum(dice_list)/len(dice_list):.4f}")
-print("=" * 60)
+if __name__ == "__main__":
+    main()

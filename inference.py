@@ -1,205 +1,44 @@
-# inference.py
-
-import os
+import argparse
 
 import torch
-import numpy as np
-import nibabel as nib
-import matplotlib.pyplot as plt
+from PIL import Image
 
-from model import UNet2D
+from config import BEST_MODEL_PATH, CLASS_NAMES
+from data_loader import get_transforms
+from model import build_model
+from train import get_device
 
-# ============================================================
-# DEVICE
-# ============================================================
 
-device = torch.device(
-    "mps" if torch.backends.mps.is_available()
-    else "cpu"
-)
+def predict(image_path):
+    device = get_device()
+    transform = get_transforms(train=False)
 
-print("=" * 60)
-print(f"🚀 device: {device}")
-print("=" * 60)
+    image = Image.open(image_path).convert("RGB")
+    tensor = transform(image).unsqueeze(0).to(device)
 
-# ============================================================
-# MODEL LOAD
-# ============================================================
+    model = build_model().to(device)
+    model.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=device))
+    model.eval()
 
-model = UNet2D().to(device)
+    with torch.no_grad():
+        output = model(tensor)
+        probs = torch.softmax(output, dim=1).squeeze(0).cpu()
 
-model.load_state_dict(
-    torch.load(
-        "unet2d_epoch_1.pth",
-        map_location=device
-    )
-)
+    pred_idx = int(probs.argmax())
+    return CLASS_NAMES[pred_idx], probs
 
-model.eval()
 
-print("✅ 모델 로드 완료")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("image_path", help="Path to a brain MRI image")
+    args = parser.parse_args()
 
-# ============================================================
-# DATA PATH
-# ============================================================
+    pred_class, probs = predict(args.image_path)
 
-DATA_DIR = "/Users/chanhyeok/Desktop/BioHealth_Frontier/BraTS2021_Training_Data"
+    print(f"prediction: {pred_class}")
+    for class_name, prob in zip(CLASS_NAMES, probs):
+        print(f"{class_name:12s}: {prob.item():.4f}")
 
-patient_id = "BraTS2021_00000"
 
-patient_path = os.path.join(
-    DATA_DIR,
-    patient_id
-)
-
-# ============================================================
-# MRI LOAD
-# ============================================================
-
-modalities = [
-    "flair",
-    "t1",
-    "t1ce",
-    "t2"
-]
-
-# z축 몇 번째 slice 볼지
-z = 80
-
-channels = []
-
-for m in modalities:
-
-    img_path = os.path.join(
-        patient_path,
-        f"{patient_id}_{m}.nii.gz"
-    )
-
-    img = nib.load(img_path).get_fdata()
-
-    # --------------------------------------------------------
-    # 2D slice 추출
-    # --------------------------------------------------------
-
-    slice_2d = img[:, :, z]
-
-    # --------------------------------------------------------
-    # normalization
-    # --------------------------------------------------------
-
-    mask = slice_2d > 0
-
-    if np.any(mask):
-
-        slice_2d[mask] = (
-            slice_2d[mask] - slice_2d[mask].mean()
-        ) / (
-            slice_2d[mask].std() + 1e-8
-        )
-
-    channels.append(slice_2d)
-
-# ============================================================
-# INPUT TENSOR
-# ============================================================
-
-image = np.stack(
-    channels,
-    axis=0
-)
-
-# shape:
-# [4, 240, 240]
-
-image_tensor = torch.tensor(
-    image,
-    dtype=torch.float32
-).unsqueeze(0).to(device)
-
-# shape:
-# [1, 4, 240, 240]
-
-print(f"✅ 입력 tensor shape: {image_tensor.shape}")
-
-# ============================================================
-# PREDICTION
-# ============================================================
-
-with torch.no_grad():
-
-    output = model(image_tensor)
-
-# output:
-# [1, 5, 240, 240]
-
-pred_mask = torch.argmax(
-    output,
-    dim=1
-)
-
-# shape:
-# [1, 240, 240]
-
-pred_mask = pred_mask.squeeze().cpu().numpy()
-
-print(f"✅ 예측 mask shape: {pred_mask.shape}")
-
-# ============================================================
-# GROUND TRUTH LOAD
-# ============================================================
-
-seg_path = os.path.join(
-    patient_path,
-    f"{patient_id}_seg.nii.gz"
-)
-
-gt = nib.load(seg_path).get_fdata()
-
-gt_slice = gt[:, :, z]
-
-# ============================================================
-# VISUALIZATION
-# ============================================================
-
-fig, axes = plt.subplots(
-    1,
-    3,
-    figsize=(15, 5)
-)
-
-# ------------------------------------------------------------
-# MRI
-# ------------------------------------------------------------
-
-axes[0].imshow(
-    channels[0],
-    cmap="gray"
-)
-
-axes[0].set_title("MRI (FLAIR)")
-
-# ------------------------------------------------------------
-# Ground Truth
-# ------------------------------------------------------------
-
-axes[1].imshow(
-    gt_slice,
-    cmap="jet"
-)
-
-axes[1].set_title("Ground Truth")
-
-# ------------------------------------------------------------
-# Prediction
-# ------------------------------------------------------------
-
-axes[2].imshow(
-    pred_mask,
-    cmap="jet"
-)
-
-axes[2].set_title("Prediction")
-
-plt.tight_layout()
-
-plt.show()
+if __name__ == "__main__":
+    main()

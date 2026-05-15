@@ -1,118 +1,100 @@
-import os
-import nibabel as nib
-import numpy as np
 import torch
+from torch.utils.data import DataLoader, random_split
+from torchvision import datasets, transforms
 
-from torch.utils.data import Dataset
-from sklearn.model_selection import train_test_split
+from config import (
+    BATCH_SIZE,
+    CLASS_NAMES,
+    IMAGE_SIZE,
+    NUM_WORKERS,
+    RANDOM_SEED,
+    TEST_DIR,
+    TRAIN_DIR,
+    VAL_RATIO,
+)
 
-# ============================================================
-# PATH
-# ============================================================
 
-DATA_DIR = "/Users/chanhyeok/Desktop/BioHealth_Frontier/BraTS2021_Training_Data"
-
-# ============================================================
-# SPLIT
-# ============================================================
-
-def get_split_lists():
-
-    patients = sorted([
-        f for f in os.listdir(DATA_DIR)
-        if f.startswith("BraTS2021")
-    ])
-
-    train_ids, temp_ids = train_test_split(
-        patients,
-        test_size=0.3,
-        random_state=42
-    )
-
-    val_ids, test_ids = train_test_split(
-        temp_ids,
-        test_size=0.5,
-        random_state=42
-    )
-
-    return train_ids, val_ids, test_ids
-
-# ============================================================
-# DATASET
-# ============================================================
-
-class BraTS2DDataset(Dataset):
-
-    def __init__(self, patient_ids, data_dir):
-
-        self.data_dir = data_dir
-        self.patient_ids = patient_ids
-
-        self.modalities = ["flair", "t1", "t1ce", "t2"]
-
-        self.samples = []
-
-        print("📦 slice index 생성 중...")
-
-        for pid in patient_ids:
-
-            seg_path = os.path.join(
-                data_dir, pid, f"{pid}_seg.nii.gz"
-            )
-
-            seg = nib.load(seg_path).get_fdata()
-
-            for z in range(seg.shape[2]):
-
-                # tumor 있는 slice만
-                if np.sum(seg[:, :, z]) > 0:
-                    self.samples.append((pid, z))
-
-        print(f"✅ 총 slice 수: {len(self.samples)}")
-
-    def __len__(self):
-        return len(self.samples)
-
-    def normalize(self, img):
-
-        mask = img > 0
-
-        if np.any(mask):
-            img[mask] = (
-                img[mask] - img[mask].mean()
-            ) / (img[mask].std() + 1e-8)
-
-        return img
-
-    def __getitem__(self, idx):
-
-        pid, z = self.samples[idx]
-        path = os.path.join(self.data_dir, pid)
-
-        channels = []
-
-        for m in self.modalities:
-
-            img_path = os.path.join(
-                path, f"{pid}_{m}.nii.gz"
-            )
-
-            img = nib.load(img_path).get_fdata()
-
-            slice_2d = img[:, :, z]
-            slice_2d = self.normalize(slice_2d)
-
-            channels.append(slice_2d)
-
-        image = np.stack(channels, axis=0)
-
-        seg_path = os.path.join(
-            path, f"{pid}_seg.nii.gz"
+def get_transforms(train=True):
+    if train:
+        return transforms.Compose(
+            [
+                transforms.Grayscale(num_output_channels=3),
+                transforms.Resize((256, 256)),
+                transforms.RandomResizedCrop(IMAGE_SIZE, scale=(0.85, 1.0)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomRotation(degrees=10),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+            ]
         )
 
-        mask = nib.load(seg_path).get_fdata()[:, :, z]
+    return transforms.Compose(
+        [
+            transforms.Grayscale(num_output_channels=3),
+            transforms.Resize((256, 256)),
+            transforms.CenterCrop(IMAGE_SIZE),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        ]
+    )
 
-        return (
-            torch.tensor(image, dtype=torch.float32),
-            torch.tensor(mask, dtype=torch.long)
+
+def build_datasets():
+    full_train_ds = datasets.ImageFolder(TRAIN_DIR, transform=get_transforms(train=True))
+    test_ds = datasets.ImageFolder(TEST_DIR, transform=get_transforms(train=False))
+
+    if full_train_ds.classes != CLASS_NAMES:
+        raise ValueError(
+            f"Unexpected classes: {full_train_ds.classes}. Expected: {CLASS_NAMES}"
         )
+
+    val_size = int(len(full_train_ds) * VAL_RATIO)
+    train_size = len(full_train_ds) - val_size
+
+    generator = torch.Generator().manual_seed(RANDOM_SEED)
+    train_ds, val_ds = random_split(
+        full_train_ds,
+        [train_size, val_size],
+        generator=generator,
+    )
+
+    # Validation must not use random augmentation.
+    val_ds.dataset = datasets.ImageFolder(TRAIN_DIR, transform=get_transforms(train=False))
+
+    return train_ds, val_ds, test_ds
+
+
+def build_loaders():
+    train_ds, val_ds, test_ds = build_datasets()
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        pin_memory=False,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=False,
+    )
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=False,
+    )
+
+    return train_loader, val_loader, test_loader
+
+
+if __name__ == "__main__":
+    train_loader, val_loader, test_loader = build_loaders()
+    print(f"classes: {CLASS_NAMES}")
+    print(f"train batches: {len(train_loader)}")
+    print(f"val batches: {len(val_loader)}")
+    print(f"test batches: {len(test_loader)}")
